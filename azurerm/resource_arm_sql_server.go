@@ -9,6 +9,7 @@ import (
 	"github.com/hashicorp/terraform/helper/validation"
 	"github.com/terraform-providers/terraform-provider-azurerm/azurerm/helpers/azure"
 	"github.com/terraform-providers/terraform-provider-azurerm/azurerm/helpers/response"
+	"github.com/terraform-providers/terraform-provider-azurerm/azurerm/helpers/tf"
 	"github.com/terraform-providers/terraform-provider-azurerm/azurerm/utils"
 )
 
@@ -75,25 +76,41 @@ func resourceArmSqlServerCreateUpdate(d *schema.ResourceData, meta interface{}) 
 	resGroup := d.Get("resource_group_name").(string)
 	location := azureRMNormalizeLocation(d.Get("location").(string))
 	adminUsername := d.Get("administrator_login").(string)
-	adminPassword := d.Get("administrator_login_password").(string)
 	version := d.Get("version").(string)
 
 	tags := d.Get("tags").(map[string]interface{})
 	metadata := expandTags(tags)
 
+	if requireResourcesToBeImported && d.IsNewResource() {
+		existing, err := client.Get(ctx, resGroup, name)
+		if err != nil {
+			if !utils.ResponseWasNotFound(existing.Response) {
+				return fmt.Errorf("Error checking for presence of existing SQL Server %q (Resource Group %q): %+v", name, resGroup, err)
+			}
+		}
+
+		if existing.ID != nil && *existing.ID != "" {
+			return tf.ImportAsExistsError("azurerm_sql_server", *existing.ID)
+		}
+	}
+
 	parameters := sql.Server{
 		Location: utils.String(location),
 		Tags:     metadata,
 		ServerProperties: &sql.ServerProperties{
-			Version:                    utils.String(version),
-			AdministratorLogin:         utils.String(adminUsername),
-			AdministratorLoginPassword: utils.String(adminPassword),
+			Version:            utils.String(version),
+			AdministratorLogin: utils.String(adminUsername),
 		},
+	}
+
+	if d.HasChange("administrator_login_password") {
+		adminPassword := d.Get("administrator_login_password").(string)
+		parameters.ServerProperties.AdministratorLoginPassword = utils.String(adminPassword)
 	}
 
 	future, err := client.CreateOrUpdate(ctx, resGroup, name, parameters)
 	if err != nil {
-		return err
+		return fmt.Errorf("Error issuing create/update request for SQL Server %q (Resource Group %q): %+v", name, resGroup, err)
 	}
 
 	if err = future.WaitForCompletionRef(ctx, client.Client); err != nil {
@@ -102,12 +119,12 @@ func resourceArmSqlServerCreateUpdate(d *schema.ResourceData, meta interface{}) 
 			return fmt.Errorf("SQL Server names need to be globally unique and %q is already in use.", name)
 		}
 
-		return err
+		return fmt.Errorf("Error waiting on create/update future for SQL Server %q (Resource Group %q): %+v", name, resGroup, err)
 	}
 
 	resp, err := client.Get(ctx, resGroup, name)
 	if err != nil {
-		return err
+		return fmt.Errorf("Error issuing get request for SQL Server %q (Resource Group %q): %+v", name, resGroup, err)
 	}
 
 	d.SetId(*resp.ID)

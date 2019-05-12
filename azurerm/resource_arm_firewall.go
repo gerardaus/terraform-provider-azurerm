@@ -2,14 +2,14 @@ package azurerm
 
 import (
 	"fmt"
-	"log"
-	"regexp"
-
-	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2018-04-01/network"
+	"github.com/Azure/azure-sdk-for-go/services/network/mgmt/2018-12-01/network"
 	"github.com/hashicorp/terraform/helper/schema"
 	"github.com/terraform-providers/terraform-provider-azurerm/azurerm/helpers/azure"
+	"github.com/terraform-providers/terraform-provider-azurerm/azurerm/helpers/tf"
 	"github.com/terraform-providers/terraform-provider-azurerm/azurerm/helpers/validate"
 	"github.com/terraform-providers/terraform-provider-azurerm/azurerm/utils"
+	"log"
+	"regexp"
 )
 
 var azureFirewallResourceName = "azurerm_firewall"
@@ -50,12 +50,23 @@ func resourceArmFirewall() *schema.Resource {
 						"subnet_id": {
 							Type:         schema.TypeString,
 							Required:     true,
-							ValidateFunc: azure.ValidateResourceID,
+							ForceNew:     true,
+							ValidateFunc: validateAzureFirewallSubnetName,
 						},
 						"internal_public_ip_address_id": {
-							Type:         schema.TypeString,
-							Required:     true,
-							ValidateFunc: azure.ValidateResourceID,
+							Type:          schema.TypeString,
+							Optional:      true,
+							Computed:      true,
+							ValidateFunc:  azure.ValidateResourceID,
+							Deprecated:    "This field has been deprecated. Use `public_ip_address_id` instead.",
+							ConflictsWith: []string{"ip_configuration.0.public_ip_address_id"},
+						},
+						"public_ip_address_id": {
+							Type:          schema.TypeString,
+							Optional:      true,
+							Computed:      true,
+							ValidateFunc:  azure.ValidateResourceID,
+							ConflictsWith: []string{"ip_configuration.0.internal_public_ip_address_id"},
 						},
 						"private_ip_address": {
 							Type:     schema.TypeString,
@@ -77,8 +88,22 @@ func resourceArmFirewallCreateUpdate(d *schema.ResourceData, meta interface{}) e
 	log.Printf("[INFO] preparing arguments for AzureRM Azure Firewall creation")
 
 	name := d.Get("name").(string)
-	location := azureRMNormalizeLocation(d.Get("location").(string))
 	resourceGroup := d.Get("resource_group_name").(string)
+
+	if requireResourcesToBeImported && d.IsNewResource() {
+		existing, err := client.Get(ctx, resourceGroup, name)
+		if err != nil {
+			if !utils.ResponseWasNotFound(existing.Response) {
+				return fmt.Errorf("Error checking for presence of existing Firewall %q (Resource Group %q): %s", name, resourceGroup, err)
+			}
+		}
+
+		if existing.ID != nil && *existing.ID != "" {
+			return tf.ImportAsExistsError("azurerm_firewall", *existing.ID)
+		}
+	}
+
+	location := azureRMNormalizeLocation(d.Get("location").(string))
 	tags := d.Get("tags").(map[string]interface{})
 	ipConfigs, subnetToLock, vnetToLock, err := expandArmFirewallIPConfigurations(d)
 	if err != nil {
@@ -100,6 +125,23 @@ func resourceArmFirewallCreateUpdate(d *schema.ResourceData, meta interface{}) e
 		AzureFirewallPropertiesFormat: &network.AzureFirewallPropertiesFormat{
 			IPConfigurations: ipConfigs,
 		},
+	}
+
+	if !d.IsNewResource() {
+		exists, err2 := client.Get(ctx, resourceGroup, name)
+		if err2 != nil {
+			if utils.ResponseWasNotFound(exists.Response) {
+				return fmt.Errorf("Error retrieving existing Firewall %q (Resource Group %q): firewall not found in resource group", name, resourceGroup)
+			}
+			return fmt.Errorf("Error retrieving existing Firewall %q (Resource Group %q): %s", name, resourceGroup, err2)
+		}
+		if exists.AzureFirewallPropertiesFormat == nil {
+			return fmt.Errorf("Error retrieving existing rules (Firewall %q / Resource Group %q): `props` was nil", name, resourceGroup)
+		}
+		props := *exists.AzureFirewallPropertiesFormat
+		parameters.AzureFirewallPropertiesFormat.ApplicationRuleCollections = props.ApplicationRuleCollections
+		parameters.AzureFirewallPropertiesFormat.NetworkRuleCollections = props.NetworkRuleCollections
+		parameters.AzureFirewallPropertiesFormat.NatRuleCollections = props.NatRuleCollections
 	}
 
 	future, err := client.CreateOrUpdate(ctx, resourceGroup, name, parameters)
@@ -245,7 +287,15 @@ func expandArmFirewallIPConfigurations(d *schema.ResourceData) (*[]network.Azure
 		data := configRaw.(map[string]interface{})
 		name := data["name"].(string)
 		subnetId := data["subnet_id"].(string)
-		intPubID := data["internal_public_ip_address_id"].(string)
+
+		pubID, exist := data["internal_public_ip_address_id"].(string)
+		if !exist || pubID == "" {
+			pubID, exist = data["public_ip_address_id"].(string)
+		}
+
+		if !exist || pubID == "" {
+			return nil, nil, nil, fmt.Errorf("one of `ip_configuration.0.internal_public_ip_address_id` or `ip_configuration.0.public_ip_address_id` must be set")
+		}
 
 		subnetID, err := parseAzureResourceID(subnetId)
 		if err != nil {
@@ -269,8 +319,8 @@ func expandArmFirewallIPConfigurations(d *schema.ResourceData) (*[]network.Azure
 				Subnet: &network.SubResource{
 					ID: utils.String(subnetId),
 				},
-				InternalPublicIPAddress: &network.SubResource{
-					ID: utils.String(intPubID),
+				PublicIPAddress: &network.SubResource{
+					ID: utils.String(pubID),
 				},
 			},
 		}
@@ -309,6 +359,7 @@ func flattenArmFirewallIPConfigurations(input *[]network.AzureFirewallIPConfigur
 		if pip := props.PublicIPAddress; pip != nil {
 			if id := pip.ID; id != nil {
 				afIPConfig["internal_public_ip_address_id"] = *id
+				afIPConfig["public_ip_address_id"] = *id
 			}
 		}
 		result = append(result, afIPConfig)
@@ -324,6 +375,21 @@ func validateAzureFirewallName(v interface{}, k string) (warnings []string, erro
 	// The name must begin with a letter or number, end with a letter, number or underscore, and may contain only letters, numbers, underscores, periods, or hyphens.
 	if matched := regexp.MustCompile(`^[0-9a-zA-Z]([0-9a-zA-Z.\_-]{0,}[0-9a-zA-Z_])?$`).Match([]byte(value)); !matched {
 		errors = append(errors, fmt.Errorf("%q must begin with a letter or number, end with a letter, number or underscore, and may contain only letters, numbers, underscores, periods, or hyphens.", k))
+	}
+
+	return warnings, errors
+}
+
+func validateAzureFirewallSubnetName(v interface{}, k string) (warnings []string, errors []error) {
+	parsed, err := parseAzureResourceID(v.(string))
+	if err != nil {
+		errors = append(errors, fmt.Errorf("Error parsing Azure Resource ID %q", v.(string)))
+		return warnings, errors
+	}
+	subnetName := parsed.Path["subnets"]
+	if subnetName != "AzureFirewallSubnet" {
+		errors = append(errors, fmt.Errorf("The name of the Subnet for %q must be exactly 'AzureFirewallSubnet' to be used for the Azure Firewall resource", k))
+
 	}
 
 	return warnings, errors

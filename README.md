@@ -4,6 +4,7 @@ AzureRM Terraform Provider
 - Website: https://www.terraform.io
 - [![Gitter chat](https://badges.gitter.im/hashicorp-terraform/Lobby.png)](https://gitter.im/hashicorp-terraform/Lobby)
 - Mailing list: [Google Groups](http://groups.google.com/group/terraform-tool)
+- Slack workspace: [Terraform on Azure](https://terraform-azure.slack.com) ([Request Invite](https://join.slack.com/t/terraform-azure/shared_invite/enQtNDMzNjQ5NzcxMDc3LTJkZTJhNTg3NTE5ZTdjZjFhMThmMTVmOTg5YWJkMDU1YTMzN2YyOWJmZGM3MGI4OTQ0ODQxNTEyNjdjMDAxMjM))
 
 General Requirements
 ------------
@@ -107,3 +108,9 @@ The following Environment Variables must be set in your shell prior to running a
 - `ARM_TEST_LOCATION_ALT`
 
 **Note:** Acceptance tests create real resources in Azure which often cost money to run.
+
+Crosscompiling
+--------------
+```sh
+GOOS=windows GOARCH=amd64 make build
+```

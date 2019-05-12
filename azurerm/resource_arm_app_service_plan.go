@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"strings"
 
 	"github.com/terraform-providers/terraform-provider-azurerm/azurerm/helpers/suppress"
+	"github.com/terraform-providers/terraform-provider-azurerm/azurerm/helpers/tf"
 
 	"github.com/Azure/azure-sdk-for-go/services/web/mgmt/2018-02-01/web"
 	"github.com/hashicorp/terraform/helper/schema"
@@ -45,6 +47,7 @@ func resourceArmAppServicePlan() *schema.Resource {
 					// @tombuildsstuff: I believe `app` is the older representation of `Windows`
 					// thus we need to support it to be able to import resources without recreating them.
 					"App",
+					"elastic",
 					"FunctionApp",
 					"Linux",
 					"Windows",
@@ -151,6 +154,20 @@ func resourceArmAppServicePlanCreateUpdate(d *schema.ResourceData, meta interfac
 
 	resGroup := d.Get("resource_group_name").(string)
 	name := d.Get("name").(string)
+
+	if requireResourcesToBeImported && d.IsNewResource() {
+		existing, err := client.Get(ctx, resGroup, name)
+		if err != nil {
+			if !utils.ResponseWasNotFound(existing.Response) {
+				return fmt.Errorf("Error checking for presence of existing App Service Plan %q (Resource Group %q): %s", name, resGroup, err)
+			}
+		}
+
+		if existing.ID != nil && *existing.ID != "" {
+			return tf.ImportAsExistsError("azurerm_app_service_plan", *existing.ID)
+		}
+	}
+
 	location := azureRMNormalizeLocation(d.Get("location").(string))
 	kind := d.Get("kind").(string)
 	tags := d.Get("tags").(map[string]interface{})
@@ -176,8 +193,15 @@ func resourceArmAppServicePlanCreateUpdate(d *schema.ResourceData, meta interfac
 		appServicePlan.AppServicePlanProperties.PerSiteScaling = utils.Bool(v.(bool))
 	}
 
-	if v, exists := d.GetOkExists("reserved"); exists {
-		appServicePlan.AppServicePlanProperties.Reserved = utils.Bool(v.(bool))
+	reserved, reservedExists := d.GetOkExists("reserved")
+	if strings.EqualFold(kind, "Linux") {
+		if !reserved.(bool) || !reservedExists {
+			return fmt.Errorf("Reserved has to be set to true when using kind Linux")
+		}
+	}
+
+	if reservedExists {
+		appServicePlan.AppServicePlanProperties.Reserved = utils.Bool(reserved.(bool))
 	}
 
 	future, err := client.CreateOrUpdate(ctx, resGroup, name, appServicePlan)

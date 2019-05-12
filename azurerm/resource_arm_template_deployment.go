@@ -9,18 +9,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/profiles/2017-03-09/resources/mgmt/resources"
+	"github.com/Azure/azure-sdk-for-go/services/resources/mgmt/2018-05-01/resources"
 	"github.com/hashicorp/terraform/helper/resource"
 	"github.com/hashicorp/terraform/helper/schema"
 	"github.com/hashicorp/terraform/helper/validation"
+	"github.com/terraform-providers/terraform-provider-azurerm/azurerm/helpers/tf"
 	"github.com/terraform-providers/terraform-provider-azurerm/azurerm/utils"
 )
 
 func resourceArmTemplateDeployment() *schema.Resource {
 	return &schema.Resource{
-		Create: resourceArmTemplateDeploymentCreate,
+		Create: resourceArmTemplateDeploymentCreateUpdate,
 		Read:   resourceArmTemplateDeploymentRead,
-		Update: resourceArmTemplateDeploymentCreate,
+		Update: resourceArmTemplateDeploymentCreateUpdate,
 		Delete: resourceArmTemplateDeploymentDelete,
 
 		Schema: map[string]*schema.Schema{
@@ -70,7 +71,7 @@ func resourceArmTemplateDeployment() *schema.Resource {
 	}
 }
 
-func resourceArmTemplateDeploymentCreate(d *schema.ResourceData, meta interface{}) error {
+func resourceArmTemplateDeploymentCreateUpdate(d *schema.ResourceData, meta interface{}) error {
 	client := meta.(*ArmClient)
 	deployClient := client.deploymentsClient
 	ctx := client.StopContext
@@ -78,6 +79,19 @@ func resourceArmTemplateDeploymentCreate(d *schema.ResourceData, meta interface{
 	name := d.Get("name").(string)
 	resourceGroup := d.Get("resource_group_name").(string)
 	deploymentMode := d.Get("deployment_mode").(string)
+
+	if requireResourcesToBeImported && d.IsNewResource() {
+		existing, err := deployClient.Get(ctx, resourceGroup, name)
+		if err != nil {
+			if !utils.ResponseWasNotFound(existing.Response) {
+				return fmt.Errorf("Error checking for presence of existing Template Deployment %s (resource group %s) %v", name, resourceGroup, err)
+			}
+		}
+
+		if existing.ID != nil && *existing.ID != "" {
+			return tf.ImportAsExistsError("azurerm_template_deployment", *existing.ID)
+		}
+	}
 
 	log.Printf("[INFO] preparing arguments for AzureRM Template Deployment creation.")
 	properties := resources.DeploymentProperties{
@@ -127,7 +141,7 @@ func resourceArmTemplateDeploymentCreate(d *schema.ResourceData, meta interface{
 	}
 
 	if err = future.WaitForCompletionRef(ctx, deployClient.Client); err != nil {
-		return fmt.Errorf("Error creating deployment: %+v", err)
+		return fmt.Errorf("Error waiting for deployment: %+v", err)
 	}
 
 	read, err := deployClient.Get(ctx, resourceGroup, name)
@@ -262,7 +276,7 @@ func normalizeJson(jsonString interface{}) string {
 	return string(b[:])
 }
 
-func waitForTemplateDeploymentToBeDeleted(ctx context.Context, client resources.DeploymentsClient, resourceGroup, name string) error {
+func waitForTemplateDeploymentToBeDeleted(ctx context.Context, client resources.DeploymentsGroupClient, resourceGroup, name string) error {
 	// we can't use the Waiter here since the API returns a 200 once it's deleted which is considered a polling status code..
 	log.Printf("[DEBUG] Waiting for Template Deployment (%q in Resource Group %q) to be deleted", name, resourceGroup)
 	stateConf := &resource.StateChangeConf{
@@ -278,7 +292,7 @@ func waitForTemplateDeploymentToBeDeleted(ctx context.Context, client resources.
 	return nil
 }
 
-func templateDeploymentStateStatusCodeRefreshFunc(ctx context.Context, client resources.DeploymentsClient, resourceGroup, name string) resource.StateRefreshFunc {
+func templateDeploymentStateStatusCodeRefreshFunc(ctx context.Context, client resources.DeploymentsGroupClient, resourceGroup, name string) resource.StateRefreshFunc {
 	return func() (interface{}, string, error) {
 		res, err := client.Get(ctx, resourceGroup, name)
 
